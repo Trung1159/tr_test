@@ -4,9 +4,10 @@ Quy trình mỗi lần chạy:
   1. Liệt kê các thư mục con trong thư mục Drive gốc (mỗi thư mục con = 1 mẫu).
   2. Chọn mẫu đầu tiên chưa được đăng (theo thứ tự tên thư mục).
   3. Tải toàn bộ ảnh của mẫu đó (+ file .txt mô tả nếu có).
-  4. Gửi ảnh cho Claude để viết caption bán hàng.
+  4. Gửi ảnh cho Claude để viết caption bán hàng (bài ảnh + Reels).
   5. Đăng bài nhiều ảnh lên Facebook Page.
-  6. Ghi lại mẫu đã đăng vào posted.json để không đăng lại.
+  6. Ghép ảnh thành video Reels 9:16 và đăng lên Page.
+  7. Ghi lại mẫu đã đăng vào posted.json để không đăng lại.
 """
 
 import argparse
@@ -16,6 +17,7 @@ import io
 import json
 import mimetypes
 import os
+import random
 import re
 import sys
 from datetime import datetime, timezone
@@ -27,6 +29,8 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from PIL import Image
+
+import reel
 
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 IMAGE_MIME_PREFIX = "image/"
@@ -40,12 +44,13 @@ CLAUDE_IMAGE_MAX_SIDE = 1568
 
 STATE_FILE = Path(os.environ.get("STATE_FILE", Path(__file__).parent / "posted.json"))
 CONFIG_FILE = Path(__file__).parent / "config.json"
+OUTPUT_DIR = Path(__file__).parent / "output"
 
-CAPTION_SYSTEM_PROMPT = """Bạn là copywriter bán hàng online hàng đầu Việt Nam, chuyên viết bài đăng Facebook Page có tỷ lệ chuyển đổi cao.
+CAPTION_SYSTEM_PROMPT = """Bạn là copywriter bán hàng online hàng đầu Việt Nam, chuyên viết nội dung Facebook Page có tỷ lệ chuyển đổi cao.
 
-Nhiệm vụ: nhìn ảnh sản phẩm (một mẫu, có thể nhiều góc chụp) và viết MỘT caption Facebook bằng tiếng Việt.
+Nhiệm vụ: nhìn ảnh sản phẩm (một mẫu, có thể nhiều góc chụp) và viết nội dung tiếng Việt cho cả bài đăng ảnh lẫn video Reels của mẫu đó.
 
-Yêu cầu caption:
+post_caption - caption bài đăng ảnh:
 - Mở đầu bằng 1 câu "hook" thật cuốn hút trong dòng đầu tiên (người đọc chỉ thấy 1-2 dòng trước khi bấm "Xem thêm").
 - Mô tả sản phẩm sinh động dựa trên những gì THỰC SỰ thấy trong ảnh: màu sắc, chất liệu, kiểu dáng, chi tiết nổi bật. Không bịa thông số không có trong ảnh hoặc thông tin shop cung cấp.
 - Nêu lợi ích / cảm xúc khi sở hữu, gợi ý hoàn cảnh sử dụng phù hợp.
@@ -56,7 +61,27 @@ Yêu cầu caption:
 - Độ dài khoảng 80-180 từ.
 - Nếu có giá, khuyến mãi, size... trong thông tin shop cung cấp thì đưa vào chính xác.
 
-Chỉ trả về nội dung caption, không giải thích, không đặt tiêu đề "Caption:"."""
+reel_caption - mô tả cho video Reels:
+- Ngắn gọn 1-3 câu (dưới 40 từ), giọng trẻ trung, có emoji, khác với post_caption.
+- Có lời kêu gọi hành động và 3-5 hashtag (có #reels).
+
+video_headline - chữ hiển thị phía trên video:
+- Tối đa 8 từ, gây tò mò hoặc nêu điểm nổi bật/giá. KHÔNG dùng emoji (font video không hiển thị được).
+
+video_cta - chữ hiển thị phía dưới video:
+- Tối đa 8 từ, kêu gọi đặt hàng. KHÔNG dùng emoji."""
+
+CONTENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "post_caption": {"type": "string"},
+        "reel_caption": {"type": "string"},
+        "video_headline": {"type": "string"},
+        "video_cta": {"type": "string"},
+    },
+    "required": ["post_caption", "reel_caption", "video_headline", "video_cta"],
+    "additionalProperties": False,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +194,16 @@ class ApiDrive:
         return download_file(self.service, file)
 
 
+def pick_music(drive, root_folder_id: str) -> bytes | None:
+    """Chọn ngẫu nhiên 1 file nhạc đặt trực tiếp trong thư mục gốc (nếu có)."""
+    tracks = [f for f in drive.list_children(root_folder_id) if f["mimeType"].startswith("audio/")]
+    if not tracks:
+        return None
+    track = random.choice(tracks)
+    print(f"Nhạc nền: {track['name']}")
+    return drive.download(track)
+
+
 def make_drive():
     if os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE"):
         return ApiDrive()
@@ -252,7 +287,8 @@ def to_claude_image(data: bytes) -> dict:
     }
 
 
-def write_caption(product_name: str, images: list[bytes], notes: str, shop_info: str) -> str:
+def write_content(product_name: str, images: list[bytes], notes: str, shop_info: str) -> dict:
+    """Trả về dict gồm post_caption, reel_caption, video_headline, video_cta."""
     client = anthropic.Anthropic()
 
     context = [f"Tên thư mục mẫu: {product_name}"]
@@ -260,7 +296,7 @@ def write_caption(product_name: str, images: list[bytes], notes: str, shop_info:
         context.append(f"Thông tin mẫu do shop cung cấp:\n{notes}")
     if shop_info:
         context.append(f"Thông tin chung của shop (dùng cho phần kêu gọi hành động):\n{shop_info}")
-    context.append("Hãy viết caption cho bài đăng này.")
+    context.append("Hãy viết nội dung cho bài đăng ảnh và video Reels của mẫu này.")
 
     content = [to_claude_image(b) for b in images]
     content.append({"type": "text", "text": "\n\n".join(context)})
@@ -270,16 +306,17 @@ def write_caption(product_name: str, images: list[bytes], notes: str, shop_info:
         model=os.environ.get("CLAUDE_MODEL", "claude-haiku-5-5"),
         max_tokens=16000,
         system=CAPTION_SYSTEM_PROMPT,
-        output_config={"effort": "medium"},
+        output_config={"effort": "medium", "format": {"type": "json_schema", "schema": CONTENT_SCHEMA}},
         messages=[{"role": "user", "content": content}],
     )
     if response.stop_reason == "refusal":
         raise RuntimeError(f"Claude từ chối viết caption cho mẫu '{product_name}'.")
 
-    caption = "".join(b.text for b in response.content if b.type == "text").strip()
-    if not caption:
+    text = next((b.text for b in response.content if b.type == "text"), "")
+    result = {k: v.strip() for k, v in json.loads(text).items()}
+    if not result["post_caption"]:
         raise RuntimeError("Claude trả về caption rỗng.")
-    return caption
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +365,7 @@ def post_to_facebook(caption: str, images: list[tuple[str, bytes, str]]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Tự động đăng 1 mẫu lên Facebook Page.")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Chỉ lấy ảnh và viết caption, không đăng lên Facebook, không lưu trạng thái.")
+                        help="Chỉ viết caption và tạo video, không đăng lên Facebook, không lưu trạng thái.")
     args = parser.parse_args()
 
     config = load_config()
@@ -349,26 +386,54 @@ def main() -> int:
     notes = "\n".join(drive.download(f).decode("utf-8", errors="ignore").strip()
                       for f in product["notes"]).strip()
 
-    caption = write_caption(folder["name"], [data for _, data, _ in images], notes,
+    content = write_content(folder["name"], [data for _, data, _ in images], notes,
                             config.get("shop_info", "").strip())
-    print("----- CAPTION -----")
-    print(caption)
-    print("-------------------")
+    print("----- CAPTION BÀI ĐĂNG -----")
+    print(content["post_caption"])
+    print("----- REELS -----")
+    print(f"Chữ trên video: {content['video_headline']} | {content['video_cta']}")
+    print(content["reel_caption"])
+    print("-----------------")
+
+    video_path = None
+    if config.get("reel", True):
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        music = pick_music(drive, root_folder_id)
+        video_path = reel.build_reel(
+            [data for _, data, _ in images], content["video_headline"], content["video_cta"],
+            OUTPUT_DIR / f"reel_{folder['id']}.mp4", music,
+        )
+        print(f"Đã tạo video Reels: {video_path}")
 
     if args.dry_run:
         print("Dry run: không đăng lên Facebook.")
         return 0
 
-    post_id = post_to_facebook(caption, images)
-    print(f"Đã đăng thành công: https://www.facebook.com/{post_id}")
+    post_id = post_to_facebook(content["post_caption"], images)
+    print(f"Đã đăng bài ảnh: https://www.facebook.com/{post_id}")
 
-    state["posted"][folder["id"]] = {
+    entry = {
         "name": folder["name"],
         "post_id": post_id,
         "posted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "caption": caption,
+        "caption": content["post_caption"],
     }
+    # Lưu ngay sau khi đăng bài ảnh để lỗi Reels không làm bài ảnh bị đăng lại hôm sau.
+    state["posted"][folder["id"]] = entry
     save_state(state)
+
+    if video_path:
+        try:
+            reel_id = reel.post_reel(video_path, content["reel_caption"], graph_url, check_fb)
+        except Exception as exc:
+            entry["reel_error"] = str(exc)
+            save_state(state)
+            print(f"Đăng Reels thất bại: {exc}")
+            return 1
+        entry["reel_id"] = reel_id
+        entry["reel_caption"] = content["reel_caption"]
+        save_state(state)
+        print(f"Đã đăng Reels: https://www.facebook.com/reel/{reel_id}")
     return 0
 
 
