@@ -265,13 +265,12 @@ def write_caption(product_name: str, images: list[bytes], notes: str, shop_info:
     content = [to_claude_image(b) for b in images]
     content.append({"type": "text", "text": "\n\n".join(context)})
 
-    response = client.beta.messages.create(
-        model=os.environ.get("CLAUDE_MODEL", "claude-opus-5-5"),
+    # Haiku là model rẻ nhất (~50đ/bài); đặt CLAUDE_MODEL=claude-opus-5-5 nếu muốn caption tốt hơn.
+    response = client.messages.create(
+        model=os.environ.get("CLAUDE_MODEL", "claude-haiku-5-5"),
         max_tokens=16000,
         system=CAPTION_SYSTEM_PROMPT,
         output_config={"effort": "medium"},
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
         messages=[{"role": "user", "content": content}],
     )
     if response.stop_reason == "refusal":

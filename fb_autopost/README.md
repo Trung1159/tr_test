@@ -44,7 +44,7 @@ Repo → *Settings → Secrets and variables → Actions → New repository secr
 
 | Tên | Lấy ở đâu |
 |---|---|
-| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) → *Create Key* (cần nạp tiền; mỗi bài chỉ tốn vài trăm đồng) |
+| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) → *Create Key* (nạp tối thiểu khoảng 5 USD một lần; tool dùng Claude Haiku 5.5 nên mỗi bài chỉ khoảng 50đ, số tiền nạp đủ dùng nhiều năm) |
 | `FB_PAGE_ID` | Page → *Giới thiệu* → *Minh bạch về Trang* → ID Trang |
 | `FB_PAGE_ACCESS_TOKEN` | Xem bên dưới |
 
@@ -65,6 +65,7 @@ Nếu thiếu cài đặt nào, log sẽ ghi rõ thiếu gì.
 - Đổi giờ đăng: sửa dòng `cron` trong `.github/workflows/fb-daily-post.yml` (giờ UTC, VN = UTC+7). Ví dụ 20:00 tối VN là `"0 13 * * *"`.
 - Muốn đăng lại một mẫu: xoá mục của nó trong `posted.json`.
 - Chỉnh giọng văn caption: `CAPTION_SYSTEM_PROMPT` trong `autopost.py`.
+- Muốn caption hay hơn (đắt hơn, khoảng 1.500–2.000đ/bài): đặt biến môi trường `CLAUDE_MODEL=claude-opus-5-5` trong bước *Create post* của workflow.
 - Không muốn chia sẻ Drive công khai: tạo service account Google Cloud, chia sẻ thư mục cho email service account,
   rồi thêm secret `GOOGLE_SERVICE_ACCOUNT_JSON` (nội dung file JSON). Tool sẽ tự dùng cách này khi có secret.
 
