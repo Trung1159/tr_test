@@ -31,7 +31,10 @@ jobs:
           cache-dependency-path: fb_autopost/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r fb_autopost/requirements.txt
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core
+          pip install -r fb_autopost/requirements.txt
 
       - name: Create post
         env:
@@ -46,8 +49,17 @@ jobs:
             python fb_autopost/autopost.py
           fi
 
+      - name: Upload Reels video
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: reel-video
+          path: fb_autopost/output/*.mp4
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Save posted state
-        if: ${{ !inputs.dry_run }}
+        if: ${{ always() && !inputs.dry_run }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
