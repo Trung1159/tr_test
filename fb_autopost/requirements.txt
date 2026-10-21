@@ -1,0 +1,5 @@
+anthropic>=2.0
+google-api-python-client>=2.150
+google-auth>=2.35
+requests>=2.32
+Pillow>=11.0
