@@ -11,9 +11,12 @@ Quy trình mỗi lần chạy:
 
 import argparse
 import base64
+import html
 import io
 import json
+import mimetypes
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +39,7 @@ MAX_IMAGES_PER_POST = 10
 CLAUDE_IMAGE_MAX_SIDE = 1568
 
 STATE_FILE = Path(os.environ.get("STATE_FILE", Path(__file__).parent / "posted.json"))
+CONFIG_FILE = Path(__file__).parent / "config.json"
 
 CAPTION_SYSTEM_PROMPT = """Bạn là copywriter bán hàng online hàng đầu Việt Nam, chuyên viết bài đăng Facebook Page có tỷ lệ chuyển đổi cao.
 
@@ -70,8 +74,106 @@ def save_state(state: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Google Drive
+# Cấu hình
 # ---------------------------------------------------------------------------
+
+def load_config() -> dict:
+    """Đọc config.json; biến môi trường cùng tên (viết hoa) được ưu tiên hơn."""
+    config = json.loads(CONFIG_FILE.read_text(encoding="utf-8")) if CONFIG_FILE.exists() else {}
+    for key in ("drive_folder", "shop_info"):
+        env = os.environ.get(key.upper(), "").strip()
+        if env:
+            config[key] = env
+    return config
+
+
+def folder_id_from(value: str) -> str:
+    """Nhận link thư mục Drive hoặc ID, trả về ID."""
+    match = re.search(r"/folders/([\w-]+)", value) or re.search(r"[?&]id=([\w-]+)", value)
+    return match.group(1) if match else value.strip()
+
+
+def check_setup(config: dict, dry_run: bool) -> None:
+    missing = []
+    if not config.get("drive_folder"):
+        missing.append("drive_folder trong fb_autopost/config.json (link thư mục Drive)")
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        missing.append("secret ANTHROPIC_API_KEY")
+    if not dry_run:
+        for name in ("FB_PAGE_ID", "FB_PAGE_ACCESS_TOKEN"):
+            if not os.environ.get(name):
+                missing.append(f"secret {name}")
+    if missing:
+        raise SystemExit("Thiếu cài đặt:\n  - " + "\n  - ".join(missing))
+
+
+# ---------------------------------------------------------------------------
+# Google Drive
+#
+# Mặc định đọc thư mục được chia sẻ "Bất kỳ ai có đường liên kết" mà không cần
+# tài khoản Google Cloud. Nếu có GOOGLE_SERVICE_ACCOUNT_JSON/FILE thì dùng Drive API.
+# ---------------------------------------------------------------------------
+
+class PublicDrive:
+    LIST_URL = "https://drive.google.com/embeddedfolderview?id={id}"
+    DOWNLOAD_URLS = (
+        "https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t",
+        "https://drive.google.com/uc?export=download&id={id}",
+    )
+    ENTRY_RE = re.compile(
+        r'<a href="(?P<href>[^"]+)"[^>]*>.*?<div class="flip-entry-title">(?P<name>.*?)</div>',
+        re.S,
+    )
+
+    def list_children(self, folder_id: str) -> list[dict]:
+        resp = requests.get(self.LIST_URL.format(id=folder_id), timeout=60)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Không đọc được thư mục Drive {folder_id} (HTTP {resp.status_code}). "
+                "Hãy chia sẻ thư mục ở chế độ 'Bất kỳ ai có đường liên kết đều có thể xem'."
+            )
+        files = []
+        for m in self.ENTRY_RE.finditer(resp.text):
+            href, name = html.unescape(m.group("href")), html.unescape(m.group("name")).strip()
+            if folder := re.search(r"/folders/([\w-]+)", href):
+                files.append({"id": folder.group(1), "name": name, "mimeType": FOLDER_MIME})
+            elif doc := re.search(r"/document/d/([\w-]+)", href):
+                files.append({"id": doc.group(1), "name": name,
+                              "mimeType": "application/vnd.google-apps.document"})
+            elif f := re.search(r"/file/d/([\w-]+)", href):
+                mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+                files.append({"id": f.group(1), "name": name, "mimeType": mime})
+        return sorted(files, key=lambda f: f["name"])
+
+    def download(self, file: dict) -> bytes:
+        if file["mimeType"] == "application/vnd.google-apps.document":
+            urls = [f"https://docs.google.com/document/d/{file['id']}/export?format=txt"]
+        else:
+            urls = [u.format(id=file["id"]) for u in self.DOWNLOAD_URLS]
+        for url in urls:
+            resp = requests.get(url, timeout=120)
+            content_type = resp.headers.get("Content-Type", "")
+            if resp.status_code == 200 and "text/html" not in content_type:
+                return resp.content
+        raise RuntimeError(f"Không tải được file '{file['name']}' từ Drive.")
+
+
+class ApiDrive:
+    def __init__(self):
+        self.service = drive_service()
+
+    def list_children(self, folder_id: str) -> list[dict]:
+        return list_children(self.service, folder_id)
+
+    def download(self, file: dict) -> bytes:
+        return download_file(self.service, file)
+
+
+def make_drive():
+    if os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON") or os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE"):
+        return ApiDrive()
+    return PublicDrive()
+
 
 def drive_service():
     raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -115,12 +217,12 @@ def download_file(service, file: dict) -> bytes:
     return buf.getvalue()
 
 
-def pick_next_product(service, root_folder_id: str, state: dict) -> dict | None:
+def pick_next_product(drive, root_folder_id: str, state: dict) -> dict | None:
     """Trả về thư mục mẫu đầu tiên chưa đăng và có ít nhất 1 ảnh."""
-    for item in list_children(service, root_folder_id):
+    for item in drive.list_children(root_folder_id):
         if item["mimeType"] != FOLDER_MIME or item["id"] in state["posted"]:
             continue
-        children = list_children(service, item["id"])
+        children = drive.list_children(item["id"])
         images = [f for f in children if f["mimeType"].startswith(IMAGE_MIME_PREFIX)]
         if not images:
             print(f"Bỏ qua thư mục '{item['name']}': không có ảnh.")
@@ -150,10 +252,9 @@ def to_claude_image(data: bytes) -> dict:
     }
 
 
-def write_caption(product_name: str, images: list[bytes], notes: str) -> str:
+def write_caption(product_name: str, images: list[bytes], notes: str, shop_info: str) -> str:
     client = anthropic.Anthropic()
 
-    shop_info = os.environ.get("SHOP_INFO", "").strip()
     context = [f"Tên thư mục mẫu: {product_name}"]
     if notes:
         context.append(f"Thông tin mẫu do shop cung cấp:\n{notes}")
@@ -231,11 +332,13 @@ def main() -> int:
                         help="Chỉ lấy ảnh và viết caption, không đăng lên Facebook, không lưu trạng thái.")
     args = parser.parse_args()
 
-    root_folder_id = os.environ["DRIVE_FOLDER_ID"]
+    config = load_config()
+    check_setup(config, args.dry_run)
+    root_folder_id = folder_id_from(config["drive_folder"])
     state = load_state()
-    service = drive_service()
+    drive = make_drive()
 
-    product = pick_next_product(service, root_folder_id, state)
+    product = pick_next_product(drive, root_folder_id, state)
     if product is None:
         print("Không còn mẫu nào chưa đăng. Hãy thêm thư mục mẫu mới vào Drive.")
         return 0
@@ -243,11 +346,12 @@ def main() -> int:
     folder = product["folder"]
     print(f"Mẫu được chọn: {folder['name']} ({len(product['images'])} ảnh)")
 
-    images = [(f["name"], download_file(service, f), f["mimeType"]) for f in product["images"]]
-    notes = "\n".join(download_file(service, f).decode("utf-8", errors="ignore").strip()
+    images = [(f["name"], drive.download(f), f["mimeType"]) for f in product["images"]]
+    notes = "\n".join(drive.download(f).decode("utf-8", errors="ignore").strip()
                       for f in product["notes"]).strip()
 
-    caption = write_caption(folder["name"], [data for _, data, _ in images], notes)
+    caption = write_caption(folder["name"], [data for _, data, _ in images], notes,
+                            config.get("shop_info", "").strip())
     print("----- CAPTION -----")
     print(caption)
     print("-------------------")

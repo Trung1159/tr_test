@@ -36,11 +36,9 @@ jobs:
       - name: Create post
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
-          SHOP_INFO: ${{ vars.SHOP_INFO }}
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             python fb_autopost/autopost.py --dry-run

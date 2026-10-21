@@ -1,20 +1,20 @@
 # Tool tự động đăng bài lên Facebook Page
 
-Mỗi ngày tool sẽ:
+Mỗi ngày lúc **9:00 sáng (giờ VN)** tool sẽ tự:
 
 1. Lấy **1 mẫu** chưa đăng từ thư mục Google Drive của bạn.
 2. Gửi ảnh cho Claude để **viết caption bán hàng** hấp dẫn, có hook, CTA và hashtag.
 3. **Đăng bài nhiều ảnh** lên Facebook Page.
 4. Ghi lại mẫu đã đăng vào `posted.json` để không bao giờ đăng trùng.
 
-Tool chạy miễn phí trên **GitHub Actions** lúc 9:00 sáng (giờ VN) mỗi ngày — bạn không cần bật máy.
+Tool chạy trên **GitHub Actions**, không cần bật máy.
 
-## 1. Sắp xếp thư mục Drive
+## Việc hằng ngày của bạn: chỉ thêm ảnh vào Drive
 
-Mỗi mẫu là **một thư mục con**, bên trong có 1 hoặc nhiều ảnh:
+Mỗi mẫu là **một thư mục con** trong thư mục gốc, bên trong có 1 hoặc nhiều ảnh:
 
 ```
-Ảnh bán hàng/              <- thư mục gốc (DRIVE_FOLDER_ID)
+Ảnh bán hàng/              <- thư mục gốc
 ├── 001 - Váy hoa nhí/
 │   ├── 1.jpg
 │   ├── 2.jpg
@@ -24,60 +24,56 @@ Mỗi mẫu là **một thư mục con**, bên trong có 1 hoặc nhiều ảnh:
 └── ...
 ```
 
-- Tool đăng theo **thứ tự tên thư mục** (nên đánh số 001, 002, ... để kiểm soát thứ tự).
-- File `.txt` hoặc Google Docs trong thư mục mẫu sẽ được đưa cho Claude làm thông tin sản phẩm
-  (ví dụ: `Giá 350k, size S-M-L, vải lụa, freeship đơn từ 500k`). Có thông tin này caption sẽ chính xác và chốt đơn tốt hơn nhiều.
-- Mỗi bài tối đa 10 ảnh.
+- Tool đăng theo **thứ tự tên thư mục** → nên đánh số 001, 002, ...
+- File `.txt` hoặc Google Docs trong thư mục mẫu là thông tin sản phẩm cho Claude
+  (ví dụ: `Giá 350k, size S-M-L, vải lụa`). Có thông tin này caption sẽ chốt đơn tốt hơn nhiều.
+- Mỗi bài tối đa 10 ảnh. Ảnh nên có đuôi `.jpg`, `.png`, `.webp`.
 
-## 2. Chuẩn bị tài khoản
+## Cài đặt một lần
 
-### Google Drive (service account)
-1. Vào [Google Cloud Console](https://console.cloud.google.com/), tạo project, bật **Google Drive API**.
-2. *IAM & Admin → Service Accounts* → tạo service account → tab *Keys* → *Add key → JSON* → tải file JSON về.
-3. Mở thư mục gốc trên Drive → **Chia sẻ** cho email của service account (dạng `xxx@xxx.iam.gserviceaccount.com`) quyền **Người xem**.
-4. `DRIVE_FOLDER_ID` là đoạn cuối của link thư mục: `https://drive.google.com/drive/folders/<DRIVE_FOLDER_ID>`.
+### 1. Chia sẻ thư mục Drive
+Chuột phải thư mục gốc → **Chia sẻ** → *Quyền truy cập chung* → **Bất kỳ ai có đường liên kết** (Người xem).
+Dán link thư mục vào `drive_folder` trong `fb_autopost/config.json`.
 
-### Facebook Page
-1. Tạo app tại [developers.facebook.com](https://developers.facebook.com/) (loại *Business*).
-2. Dùng [Graph API Explorer](https://developers.facebook.com/tools/explorer/) lấy **User token** với quyền
-   `pages_show_list`, `pages_read_engagement`, `pages_manage_posts`.
-3. Đổi sang token dài hạn rồi gọi `GET /me/accounts` để lấy **Page access token** (token này không hết hạn) và **Page ID**.
+### 2. Thông tin shop
+Điền `shop_info` trong `fb_autopost/config.json`, ví dụ:
+`Inbox page hoặc gọi/Zalo 09xx.xxx.xxx. Ship COD toàn quốc, kiểm tra hàng trước khi nhận.`
 
-### Claude
-Tạo API key tại [console.anthropic.com](https://console.anthropic.com/).
+### 3. Ba khoá bí mật trên GitHub
+Repo → *Settings → Secrets and variables → Actions → New repository secret*:
 
-## 3. Cài đặt trên GitHub
+| Tên | Lấy ở đâu |
+|---|---|
+| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) → *Create Key* (cần nạp tiền; mỗi bài chỉ tốn vài trăm đồng) |
+| `FB_PAGE_ID` | Page → *Giới thiệu* → *Minh bạch về Trang* → ID Trang |
+| `FB_PAGE_ACCESS_TOKEN` | Xem bên dưới |
 
-Vào repo → *Settings → Secrets and variables → Actions*:
+**Lấy Page access token:**
+1. Vào [developers.facebook.com/apps](https://developers.facebook.com/apps) → *Tạo ứng dụng* → loại *Doanh nghiệp / Business*.
+2. Mở [Graph API Explorer](https://developers.facebook.com/tools/explorer/), chọn app vừa tạo, thêm quyền
+   `pages_show_list`, `pages_read_engagement`, `pages_manage_posts` → *Generate Access Token* → đăng nhập và chọn Page.
+3. Ở ô *User or Page*, chọn Page của bạn → copy token.
+4. Để token **không hết hạn**: dán token vào [Access Token Debugger](https://developers.facebook.com/tools/debug/accesstoken/)
+   → *Extend Access Token* → quay lại Graph API Explorer với token dài hạn đó, chọn lại Page ở ô *User or Page* → copy token Page.
 
-| Loại | Tên | Giá trị |
-|---|---|---|
-| Secret | `ANTHROPIC_API_KEY` | API key Claude |
-| Secret | `GOOGLE_SERVICE_ACCOUNT_JSON` | Dán **toàn bộ nội dung** file JSON service account |
-| Secret | `DRIVE_FOLDER_ID` | ID thư mục gốc |
-| Secret | `FB_PAGE_ID` | ID của Page |
-| Secret | `FB_PAGE_ACCESS_TOKEN` | Page access token |
-| Variable | `SHOP_INFO` | (khuyến nghị) Thông tin chung của shop, ví dụ: `Inbox page hoặc gọi/Zalo 09xx.xxx.xxx. Ship COD toàn quốc, kiểm tra hàng trước khi nhận.` |
+### 4. Chạy thử
+Tab *Actions → Facebook daily post → Run workflow*, tích **dry_run** → xem caption trong log mà không đăng.
+Nếu thiếu cài đặt nào, log sẽ ghi rõ thiếu gì.
 
-Workflow nằm ở `.github/workflows/fb-daily-post.yml` và cần được merge vào nhánh mặc định thì lịch hằng ngày mới chạy.
+## Tuỳ chỉnh
 
-**Chạy thử:** tab *Actions → Facebook daily post → Run workflow*, tích **dry_run** để chỉ xem caption mà không đăng.
+- Đổi giờ đăng: sửa dòng `cron` trong `.github/workflows/fb-daily-post.yml` (giờ UTC, VN = UTC+7). Ví dụ 20:00 tối VN là `"0 13 * * *"`.
+- Muốn đăng lại một mẫu: xoá mục của nó trong `posted.json`.
+- Chỉnh giọng văn caption: `CAPTION_SYSTEM_PROMPT` trong `autopost.py`.
+- Không muốn chia sẻ Drive công khai: tạo service account Google Cloud, chia sẻ thư mục cho email service account,
+  rồi thêm secret `GOOGLE_SERVICE_ACCOUNT_JSON` (nội dung file JSON). Tool sẽ tự dùng cách này khi có secret.
 
-Đổi giờ đăng: sửa dòng `cron` trong workflow (giờ UTC, VN = UTC+7). Ví dụ 20:00 tối VN là `"0 13 * * *"`.
-
-## 4. Chạy trên máy tính (không bắt buộc)
+## Chạy trên máy tính (không bắt buộc)
 
 ```bash
 cd fb_autopost
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY=... DRIVE_FOLDER_ID=... FB_PAGE_ID=... FB_PAGE_ACCESS_TOKEN=...
-export GOOGLE_SERVICE_ACCOUNT_FILE=service_account.json
+export ANTHROPIC_API_KEY=... FB_PAGE_ID=... FB_PAGE_ACCESS_TOKEN=...
 python autopost.py --dry-run   # xem thử caption
 python autopost.py             # đăng thật
 ```
-
-## Ghi chú
-
-- Muốn đăng lại một mẫu: xoá mục của nó trong `posted.json`.
-- Hết mẫu chưa đăng thì tool chỉ báo "Không còn mẫu nào" và không đăng gì.
-- Có thể chỉnh giọng văn caption trong `CAPTION_SYSTEM_PROMPT` ở `autopost.py`.
